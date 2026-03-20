@@ -1,11 +1,10 @@
+import io
 import os
 import time
 import random
 import gspread
 import requests
 import pandas as pd
-import time
-import random
 import tempfile
 import threading
 
@@ -17,6 +16,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
 from oauth2client.service_account import ServiceAccountCredentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 
 app = Flask(__name__)
 
@@ -24,12 +25,14 @@ is_bot_running = False
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1PhLeAyLGlpq4_2fnkMIUNqpmOHIOiihfKLjE3C7vbVI/edit?usp=sharing"
 
+DRIVE_FOLDER_ID = "1r4kNZEWpz0vjU58bmjt6fPj6Feh3FYKe"
+
 PROFILE_PATH = (
     r"C:\Users\Admin\AppData\Roaming\Mozilla\Firefox\Profiles\pb3t7nk5.twitterbot"
 )
 
 
-def load_tweet_sheet(sheet_url):
+def get_credential():
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
@@ -39,6 +42,10 @@ def load_tweet_sheet(sheet_url):
         "service_account.json", scope
     )
 
+    return creds
+
+
+def load_tweet_sheet(sheet_url, creds):
     client = gspread.authorize(creds)
 
     # 👇 IMPORTANT: select worksheet by name
@@ -48,6 +55,52 @@ def load_tweet_sheet(sheet_url):
     df = pd.DataFrame(data)
 
     return worksheet, df
+
+
+def get_random_image_from_drive(creds, folder_id):
+    try:
+        drive_service = build("drive", "v3", credentials=creds)
+
+        # Find image files in the specified folder
+        query = f"'{folder_id}' in parents and mimeType contains 'image/' and trashed = false"
+        results = (
+            drive_service.files().list(q=query, fields="files(id, name)").execute()
+        )
+        items = results.get("files", [])
+
+        if not items:
+            print("⚠ No images found in Drive folder.")
+            return None
+
+        # Select a random image
+        random_file = random.choice(items)
+        file_id = random_file["id"]
+        file_name = random_file["name"]
+
+        print(f"Selected image from Drive: {file_name} (ID: {file_id})")
+
+        # Download the image content
+        request = drive_service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+
+        # Determine file extension
+        suffix = os.path.splitext(file_name)[1]
+        if not suffix:
+            suffix = ".png"
+
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        temp_file.write(fh.getvalue())
+        temp_file.close()
+
+        return temp_file.name
+
+    except Exception as e:
+        print("❌ Error fetching image from Drive:", e)
+        return None
 
 
 def build_main_tweet(row, max_mentions=4):
@@ -241,6 +294,8 @@ def run_twitter_bot():
     options.add_argument(PROFILE_PATH)
     # options.profile = PROFILE_PATH
 
+    creds = get_credential()
+
     try:
         # ❌ DO NOT use headless
         driver = webdriver.Firefox(options=options)
@@ -258,7 +313,7 @@ def run_twitter_bot():
         else:
             print("✅ Logged in via profile")
 
-        worksheet, df = load_tweet_sheet(SHEET_URL)
+        worksheet, df = load_tweet_sheet(SHEET_URL, creds)
 
         for idx, row in df.iterrows():
             print(f"\n--- Processing row {idx + 2} ---")
@@ -271,7 +326,7 @@ def run_twitter_bot():
             main_text, add_content = build_main_tweet(row)
             print("Main text length:", len(main_text))
             print("Add content length:", len(add_content))
-            image_path = row.get("IMAGE", "").strip()
+            # image_path = row.get("IMAGE", "").strip()
 
             if not main_text:
                 continue
@@ -285,8 +340,11 @@ def run_twitter_bot():
                 worksheet.update_cell(idx + 2, 6, f"too long - add content")
                 break
 
+            local_image_path = get_random_image_from_drive(
+                get_credential(), DRIVE_FOLDER_ID
+            )
             try:
-                post_to_twitter(driver, main_text, image_path, add_content)
+                post_to_twitter(driver, main_text, local_image_path, add_content)
                 worksheet.update_cell(idx + 2, 6, "Success")  # Status column
                 print(f"✅ Posted row {idx + 2}")
 
@@ -294,16 +352,24 @@ def run_twitter_bot():
                 worksheet.update_cell(idx + 2, 6, f"Failed")
                 print(f"❌ Failed row {idx + 2}: {e}")
                 break
+            finally:
+                if local_image_path and os.path.exists(local_image_path):
+                    try:
+                        os.remove(local_image_path)
+                        print(f"🧹 Temp image deleted: {local_image_path}")
+                    except Exception as e:
+                        print("⚠ Could not delete temp file:", e)
     finally:
         print("Closing browser...")
         time.sleep(5)
-        driver.quit()
+        if driver:
+            driver.quit()
         is_bot_running = False
         print("Bot finished.")
 
 
 # --- Flask route to trigger bot ---
-@app.route("/trigger_bot", methods=["GET"])
+@app.route("/", methods=["GET"])
 def trigger_bot():
     global is_bot_running
 
