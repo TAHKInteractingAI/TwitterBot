@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import time
 import random
 import gspread
@@ -8,6 +9,7 @@ import pandas as pd
 import tempfile
 import threading
 
+from datetime import datetime
 from flask import Flask
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -24,8 +26,6 @@ app = Flask(__name__)
 is_bot_running = False
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1PhLeAyLGlpq4_2fnkMIUNqpmOHIOiihfKLjE3C7vbVI/edit?usp=sharing"
-
-DRIVE_FOLDER_ID = "1r4kNZEWpz0vjU58bmjt6fPj6Feh3FYKe"
 
 PROFILE_PATH = (
     r"C:\Users\Admin\AppData\Roaming\Mozilla\Firefox\Profiles\pb3t7nk5.twitterbot"
@@ -57,6 +57,24 @@ def load_tweet_sheet(sheet_url, creds):
     return worksheet, df
 
 
+def extract_folder_id(url):
+    if not url:
+        return None
+
+    # Try to extract folder ID from URL
+    match = re.search(r"/folders/([a-zA-Z0-9_-]+)", url)
+
+    if match:
+        return match.group(1)
+
+    # If not found, try the old pattern
+    match = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
+
+    if match:
+        return match.group(1)
+    return None
+
+
 def get_random_image_from_drive(creds, folder_id):
     try:
         drive_service = build("drive", "v3", credentials=creds)
@@ -69,7 +87,7 @@ def get_random_image_from_drive(creds, folder_id):
         items = results.get("files", [])
 
         if not items:
-            print("⚠ No images found in Drive folder.")
+            print(f"⚠ No images found in Drive ID: {folder_id}")
             return None
 
         # Select a random image
@@ -111,7 +129,13 @@ def build_main_tweet(row, max_mentions=4):
 
     # --- Clean lists ---
     tag_list = [f"@{t.strip()}" for t in tags.split(",") if t.strip()]
-    hashtag_list = [f"#{h.strip()}" for h in hashtags.split(",") if h.strip()]
+    hashtag_list = []
+    for h in hashtags.split(","):
+        h_clean = h.strip()
+        if h_clean:
+            if not h_clean.startswith("#"):
+                h_clean = "#" + h_clean
+            hashtag_list.append(h_clean)
 
     # --- Limit mentions (3–4 randomly for natural look) ---
     if len(tag_list) > max_mentions:
@@ -120,16 +144,16 @@ def build_main_tweet(row, max_mentions=4):
 
     parts = []
 
-    if content:
-        parts.append(content.strip())
-
     if hashtag_list:
         parts.append(" ".join(hashtag_list))
+
+    if content and content.strip():
+        parts.append(content.strip())
 
     if tag_list:
         parts.append(" ".join(tag_list))
 
-    main_text = " ".join(parts).strip()
+    main_text = "\n\n".join(parts).strip()
 
     return main_text, add_content.strip()
 
@@ -209,22 +233,33 @@ def click_add_post(driver, max_attempts=2):
     print("done trying to click Add post")
 
 
-def human_type(textbox, text):
-    words = text.split(" ")
+def human_type(driver, textbox, text):
 
-    for i, word in enumerate(words):
-        textbox.send_keys(word)
+    lines = text.split("\n")
+    for line_indexn, line in enumerate(lines):
+        words = line.split(" ")
 
-        # Add space after every word except last
-        if i < len(words) - 1:
-            textbox.send_keys(" ")
+        for i, word in enumerate(words):
+            textbox.send_keys(word)
 
-        # Normal typing pause
-        time.sleep(random.uniform(0.15, 0.4))
+            # Add space after every word except last
+            if i < len(words) - 1:
+                textbox.send_keys(" ")
 
-        # Occasional longer pause (thinking)
-        if random.random() < 0.08:
-            time.sleep(random.uniform(0.8, 1.5))
+            # Normal typing pause
+            time.sleep(random.uniform(0.1, 0.3))
+
+            # Occasional longer pause (thinking)
+            if random.random() < 0.05:
+                time.sleep(random.uniform(0.5, 1.0))
+
+        # Add line break after each line except last
+        if line_indexn < len(lines) - 1:
+            actions = ActionChains(driver)
+            actions.key_down(Keys.SHIFT).send_keys(Keys.ENTER).key_up(
+                Keys.SHIFT
+            ).perform()
+            time.sleep(0.5)
 
 
 def post_to_twitter(driver, main_text, image_path, add_content=None):
@@ -241,7 +276,7 @@ def post_to_twitter(driver, main_text, image_path, add_content=None):
     time.sleep(2)
 
     textbox.clear()  # optional
-    human_type(textbox, main_text)
+    human_type(driver, textbox, main_text)
     time.sleep(2)
 
     if image_path:
@@ -274,14 +309,30 @@ def post_to_twitter(driver, main_text, image_path, add_content=None):
 
         time.sleep(1)
 
-        human_type(second_box, add_content)
+        human_type(driver, second_box, add_content)
         time.sleep(2)
 
     time.sleep(5)
 
-    textbox.send_keys(Keys.CONTROL, Keys.ENTER)
+    driver.find_element(By.XPATH, "//body").send_keys(Keys.CONTROL, Keys.ENTER)
 
-    time.sleep(random.randint(6, 9))
+    # Wait for confirmation toast and extract tweet URL
+    try:
+        print("Waiting for post confirmation...")
+
+        toast_link_element = WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located(
+                (By.XPATH, "//div[@data-testid='toast']//a[@href]")
+            )
+        )
+        tweet_url = toast_link_element.get_attribute("href")
+        print("✅ Post successful! Tweet URL:", tweet_url)
+        time.sleep(3)
+        return tweet_url
+    except Exception as e:
+        print("⚠ Could not confirm post:", e)
+        time.sleep(5)
+        return None
 
 
 # --- Main bot function ---
@@ -292,7 +343,6 @@ def run_twitter_bot():
     options = webdriver.FirefoxOptions()
     options.add_argument("-profile")
     options.add_argument(PROFILE_PATH)
-    # options.profile = PROFILE_PATH
 
     creds = get_credential()
 
@@ -340,13 +390,29 @@ def run_twitter_bot():
                 worksheet.update_cell(idx + 2, 6, f"too long - add content")
                 break
 
-            local_image_path = get_random_image_from_drive(
-                get_credential(), DRIVE_FOLDER_ID
-            )
+            # --- Extract Drive folder ID from IMAGE column and get random image ---
+            image_col_url = str(row.get("IMAGE", "")).strip()
+            folder_id = extract_folder_id(image_col_url)
+
+            if folder_id:
+                local_image_path = get_random_image_from_drive(creds, folder_id)
+            else:
+                print(
+                    "⚠ No valid Drive folder ID found in IMAGE column, skipping image."
+                )
             try:
-                post_to_twitter(driver, main_text, local_image_path, add_content)
+                tweet_link = post_to_twitter(
+                    driver, main_text, local_image_path, add_content
+                )
                 worksheet.update_cell(idx + 2, 6, "Success")  # Status column
-                print(f"✅ Posted row {idx + 2}")
+
+                if tweet_link:
+                    worksheet.update_cell(idx + 2, 7, tweet_link)  # Tweet URL column
+
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                worksheet.update_cell(idx + 2, 8, current_time)  # Posted time column
+
+                print(f"✅ Posted row {idx + 2} in {current_time}")
 
             except Exception as e:
                 worksheet.update_cell(idx + 2, 6, f"Failed")
