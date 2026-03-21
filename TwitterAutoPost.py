@@ -153,7 +153,7 @@ def build_main_tweet(row, max_mentions=4):
     if tag_list:
         parts.append(" ".join(tag_list))
 
-    main_text = "\n\n".join(parts).strip()
+    main_text = "\n".join(parts).strip()
 
     return main_text, add_content.strip()
 
@@ -365,6 +365,9 @@ def run_twitter_bot():
 
         worksheet, df = load_tweet_sheet(SHEET_URL, creds)
 
+        # --- Track successful posts for summary ---
+        successful_posts_count = 0
+
         for idx, row in df.iterrows():
             print(f"\n--- Processing row {idx + 2} ---")
             status = row.get("Status", "").lower()
@@ -413,6 +416,28 @@ def run_twitter_bot():
                 worksheet.update_cell(idx + 2, 8, current_time)  # Posted time column
 
                 print(f"✅ Posted row {idx + 2} in {current_time}")
+
+                successful_posts_count += 1
+
+                # Check if there are more tasks remaining to decide on taking a break
+                remaining_tasks = df.iloc[idx + 1 :]
+                has_more_tasks = any(
+                    str(r.get("Status", "")).strip().lower() != "success"
+                    and str(r.get("Tweet content", "")).strip() != ""
+                    for _, r in remaining_tasks.iterrows()
+                )
+
+                if has_more_tasks:
+                    if successful_posts_count >= 2:
+                        print("⏳ Taking a longer break after 2 posts...")
+                        break
+                    else:
+                        # Shorter break between posts (15–25 minutes)
+                        delay_time = random.randint(900, 1500)
+                        print(
+                            f"⏳ Waiting for {delay_time//60} minutes before next post..."
+                        )
+                        time.sleep(delay_time)
 
             except Exception as e:
                 worksheet.update_cell(idx + 2, 6, f"Failed")
