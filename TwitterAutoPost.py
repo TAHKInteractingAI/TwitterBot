@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import re
 import time
@@ -7,10 +8,8 @@ import gspread
 import requests
 import pandas as pd
 import tempfile
-import threading
 
 from datetime import datetime
-from flask import Flask
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -21,15 +20,11 @@ from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
-app = Flask(__name__)
-
-is_bot_running = False
+print(
+    f"\n================ Bot started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ================"
+)
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1PhLeAyLGlpq4_2fnkMIUNqpmOHIOiihfKLjE3C7vbVI/edit?usp=sharing"
-
-PROFILE_PATH = (
-    r"C:\Users\Admin\AppData\Roaming\Mozilla\Firefox\Profiles\pb3t7nk5.twitterbot"
-)
 
 
 def get_credential():
@@ -38,11 +33,13 @@ def get_credential():
         "https://www.googleapis.com/auth/drive",
     ]
 
-    creds = ServiceAccountCredentials.from_json_keyfile_name(
-        "service_account.json", scope
-    )
+    # Load credentials from environment variable
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
+    if not creds_json:
+        raise ValueError("GOOGLE_CREDENTIALS environment variable not set")
 
-    return creds
+    creds_dict = json.loads(creds_json)
+    return ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 
 
 def load_tweet_sheet(sheet_url, creds):
@@ -335,33 +332,58 @@ def post_to_twitter(driver, main_text, image_path, add_content=None):
         return None
 
 
+def inject_cookies(driver):
+    """Inject cookies into the browser session to maintain login state."""
+    print("🔑 Injecting cookies for authentication...")
+    driver.get("https://x.com/404")
+    time.sleep(3)
+
+    cookies_json = os.environ.get("TWITTER_COOKIES")
+    if not cookies_json:
+        raise ValueError("TWITTER_COOKIES environment variable not set")
+
+    cookies = json.loads(cookies_json)
+    for cookie in cookies:
+        cookie_dict = {
+            "name": cookie.get("name"),
+            "value": cookie.get("value"),
+            "domain": ".x.com",
+            "path": cookie.get("path", "/"),
+        }
+        try:
+            driver.add_cookie(cookie_dict)
+        except Exception as e:
+            pass
+
+
 # --- Main bot function ---
 def run_twitter_bot():
-    global is_bot_running
-    print("\n Starting Twitter bot...")
-
+    print("\n================ Starting Twitter Bot ================")
     options = webdriver.FirefoxOptions()
-    options.add_argument("-profile")
-    options.add_argument(PROFILE_PATH)
+    options.add_argument("--headless")
+
+    # Override user agent to mimic real browser
+    options.set_preference(
+        "general.useragent.override",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    )
 
     creds = get_credential()
+    driver = None
 
     try:
         # ❌ DO NOT use headless
         driver = webdriver.Firefox(options=options)
         driver.implicitly_wait(10)
-    except Exception as e:
-        print("❌ Failed to start Firefox with profile:", e)
-        is_bot_running = False
-        return
-    try:
+        inject_cookies(driver)
+
         driver.get("https://x.com/home")
-        time.sleep(5)
+        time.sleep(8)
 
         if "login" in driver.current_url:
-            print("❌ Not logged in — open Firefox manually and login")
+            print("❌ Not logged in. Please check cookies.")
         else:
-            print("✅ Logged in via profile")
+            print("✅ Logged in successfully.")
 
         worksheet, df = load_tweet_sheet(SHEET_URL, creds)
 
@@ -387,15 +409,17 @@ def run_twitter_bot():
             # 🔎 Validate before posting
             if not validate_part(main_text):
                 worksheet.update_cell(idx + 2, 6, f"too long - main")
-                break
+                continue
 
             if add_content and not validate_part(add_content, part_name="Add content"):
                 worksheet.update_cell(idx + 2, 6, f"too long - add content")
-                break
+                continue
 
             # --- Extract Drive folder ID from IMAGE column and get random image ---
             image_col_url = str(row.get("IMAGE", "")).strip()
             folder_id = extract_folder_id(image_col_url)
+
+            local_image_path = None
 
             if folder_id:
                 local_image_path = get_random_image_from_drive(creds, folder_id)
@@ -442,7 +466,7 @@ def run_twitter_bot():
             except Exception as e:
                 worksheet.update_cell(idx + 2, 6, f"Failed")
                 print(f"❌ Failed row {idx + 2}: {e}")
-                break
+                continue
             finally:
                 if local_image_path and os.path.exists(local_image_path):
                     try:
@@ -452,29 +476,10 @@ def run_twitter_bot():
                         print("⚠ Could not delete temp file:", e)
     finally:
         print("Closing browser...")
-        time.sleep(5)
         if driver:
             driver.quit()
-        is_bot_running = False
-        print("Bot finished.")
 
 
-# --- Flask route to trigger bot ---
-@app.route("/", methods=["GET"])
-def trigger_bot():
-    global is_bot_running
-
-    if is_bot_running:
-        return "Bot is already running. Please wait.", 429
-
-    is_bot_running = True
-    threading.Thread(target=run_twitter_bot).start()
-
-    return (
-        "✅ Command received from cron-job.org, Bot is now running in the background!",
-        200,
-    )
-
-
+# Run the bot
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    run_twitter_bot()
