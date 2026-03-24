@@ -1,0 +1,27 @@
+name: Run Twitter Bot
+
+# Mở cổng cho cron-job.org gọi vào
+on:
+  repository_dispatch:
+    types: [trigger-bot]
+
+jobs:
+  post-tweet:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Cài đặt thư viện
+        run: pip install selenium gspread pandas requests google-api-python-client oauth2client
+
+      - name: Chạy Bot
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          TWITTER_COOKIES: ${{ secrets.TWITTER_COOKIES }}
+        run: python TwitterAutoPost.py
