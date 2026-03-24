@@ -9,7 +9,7 @@ import requests
 import pandas as pd
 import tempfile
 
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -20,8 +20,11 @@ from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
+# CÀI ĐẶT MÚI GIỜ VIỆT NAM (UTC+7)
+VN_TZ = timezone(timedelta(hours=7))
+
 print(
-    f"\n================ Bot started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ================"
+    f"\n================ Bot started at {datetime.now(VN_TZ).strftime('%Y-%m-%d %H:%M:%S')} ================"
 )
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1PhLeAyLGlpq4_2fnkMIUNqpmOHIOiihfKLjE3C7vbVI/edit?usp=sharing"
@@ -433,7 +436,7 @@ def run_twitter_bot():
                 if tweet_link:
                     worksheet.update_cell(idx + 2, 7, tweet_link)  # Tweet URL column
 
-                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                current_time = datetime.now(VN_TZ).strftime("%Y-%m-%d %H:%M:%S")
                 worksheet.update_cell(idx + 2, 8, current_time)  # Posted time column
 
                 print(f"✅ Posted row {idx + 2} in {current_time}")
