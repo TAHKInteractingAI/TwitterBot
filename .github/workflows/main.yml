@@ -24,4 +24,4 @@ jobs:
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           TWITTER_COOKIES: ${{ secrets.TWITTER_COOKIES }}
-        run: python TwitterAutoPost.py
+        run: python -u TwitterAutoPost.py
